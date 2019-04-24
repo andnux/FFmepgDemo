@@ -3,12 +3,15 @@
 #include <unistd.h>
 #include <string.h>
 #include <stdio.h>
-
+#include <android/native_window_jni.h>
+#include <android/native_window.h>
+#include <libswresample/swresample.h>
 #include "libavutil/adler32.h"
 #include "libavcodec/avcodec.h"
 #include "libavformat/avformat.h"
 #include "libswscale/swscale.h"
 #include "libavutil/imgutils.h"
+#include "libyuv/libyuv.h"
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
@@ -148,9 +151,8 @@ static int video_decode(const char *filename) {
 
 JNIEXPORT void JNICALL Java_top_andnux_ffmepgdemo_FFmpeg_decode(JNIEnv *env,
                                                                 jclass clazz, jstring input_jstr,
-                                                                jstring output_jstr) {
+                                                                jobject surface) {
     const char *input_cstr = (*env)->GetStringUTFChars(env, input_jstr, NULL);
-    const char *output_cstr = (*env)->GetStringUTFChars(env, output_jstr, NULL);
 //    video_decode(input_cstr);
     //1 注册组件
     av_register_all();
@@ -167,78 +169,86 @@ JNIEXPORT void JNICALL Java_top_andnux_ffmepgdemo_FFmpeg_decode(JNIEnv *env,
     }
     //3.找到视频流
     int video_stream_index = -1;
+    int audio_stream_index = -1;
     for (int i = 0; i < pFormatCtx->nb_streams; ++i) {
         if (pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_VIDEO) {
             video_stream_index = i;
-            break;
+        }
+        if (pFormatCtx->streams[i]->codec->codec_type == AVMEDIA_TYPE_AUDIO) {
+            audio_stream_index = i;
         }
     }
     if (video_stream_index == -1) {
         LOGE("%s", "没有视频流信息");
         return;
     }
-    AVCodecContext *pCodecCtx = pFormatCtx->streams[video_stream_index]->codec;
+    if (audio_stream_index == -1) {
+        LOGE("%s", "没有音频流信息");
+        return;
+    }
+    AVCodecContext *pVideoCodecCtx = pFormatCtx->streams[video_stream_index]->codec;
     //4.拿到解码器
-    AVCodec *codec = avcodec_find_decoder(pCodecCtx->codec_id);
-    if (codec == NULL) {
-        LOGE("%s", "没有找到解码器");
+    AVCodec *videoCodec = avcodec_find_decoder(pVideoCodecCtx->codec_id);
+    if (videoCodec == NULL) {
+        LOGE("%s", "没有找到视频解码器");
         return;
     }
     // 5.打开解码器
-    if (avcodec_open2(pCodecCtx, codec, NULL) < 0) {
-        LOGE("%s", "解码器无法打开");
+    if (avcodec_open2(pVideoCodecCtx, videoCodec, NULL) < 0) {
+        LOGE("%s", "视频解码器无法打开");
         return;
     }
 
     //6.一针一针读取压缩的视频数据AVPacket
     AVPacket *pPacket = av_packet_alloc();
-    AVFrame *pFrame = av_frame_alloc();
-    AVFrame *yuvFrame = av_frame_alloc();
-
-    //指定缓冲区
-    uint8_t *out_buffer = av_malloc(
-            (size_t) avpicture_get_size(AV_PIX_FMT_YUV420P, pCodecCtx->width, pCodecCtx->height));
-    avpicture_fill((AVPicture *) yuvFrame, out_buffer, AV_PIX_FMT_YUV420P,
-                   pCodecCtx->width, pCodecCtx->height);
+    AVFrame *yuv_frame = av_frame_alloc();
+    AVFrame *rgb_frame = av_frame_alloc();
 
     int got_frame, index = 0, ret;
-    // 打开文件
-    FILE *file = fopen(output_cstr, "wb");
-    //像素格式转换
-    struct SwsContext *swsContext = sws_getContext(pCodecCtx->width, pCodecCtx->height,
-                                                   pCodecCtx->pix_fmt, pCodecCtx->width,
-                                                   pCodecCtx->height,
-                                                   AV_PIX_FMT_YUV420P, SWS_FAST_BILINEAR, NULL,
-                                                   NULL, NULL);
-//    ret = av_read_frame(pFormatCtx, pPacket);
-//    LOGE("%d",ret);
-//    ret = avcodec_decode_video2(pCodecCtx, pFrame, &got_frame, pPacket);
-//    LOGE("=====%d",ret);
+    //原生绘制：1窗体
+    ANativeWindow* nativeWindow = ANativeWindow_fromSurface(env,surface);
+    //原生绘制：2绘制时的缓冲区
+    ANativeWindow_Buffer outBuffer;
+    //原生绘制：2设置缓冲区的属性（宽、高、像素格式）
+    ANativeWindow_setBuffersGeometry(nativeWindow, pVideoCodecCtx->width,
+                                     pVideoCodecCtx->height,WINDOW_FORMAT_RGBA_8888);
+
     while (0 <= av_read_frame(pFormatCtx, pPacket)) {
         if (pPacket->stream_index == video_stream_index) {
-            ret = avcodec_decode_video2(pCodecCtx, pFrame, &got_frame, pPacket);
+            ret = avcodec_decode_video2(pVideoCodecCtx, yuv_frame, &got_frame, pPacket);
             if (ret < 0) {
                 LOGD("%s", "解码完成");
             }
             //解码一帧成功
             if (got_frame > 0) {
                 LOGD("解码：%d", index++);
-                // 转为指定的yuv420p
-                sws_scale(swsContext, pFrame->data, pFrame->linesize, 0,
-                      pCodecCtx->height, yuvFrame->data, yuvFrame->linesize);
-                int y_size = pFrame->width * pFrame->height;
-                fwrite(yuvFrame->data[0], sizeof(uint8_t), (size_t) y_size, file);
-                fwrite(yuvFrame->data[1], sizeof(uint8_t), (size_t) y_size / 4, file);
-                fwrite(yuvFrame->data[2], sizeof(uint8_t), (size_t) y_size / 4, file);
+                //原生绘制：4锁定画布
+                ANativeWindow_lock(nativeWindow,&outBuffer,NULL);
+                //设置rgb_frame的属性（像素格式、宽高）和缓冲区
+                //rgb_frame缓冲区与outBuffer.bits是同一块内存
+                avpicture_fill((AVPicture *)rgb_frame, outBuffer.bits, AV_PIX_FMT_RGBA,
+                               pVideoCodecCtx->width, pVideoCodecCtx->height);
+                //YUV->RGBA_8888
+                I420ToARGB(yuv_frame->data[0],yuv_frame->linesize[0],
+                           yuv_frame->data[2],yuv_frame->linesize[2],
+                           yuv_frame->data[1],yuv_frame->linesize[1],
+                           rgb_frame->data[0], rgb_frame->linesize[0],
+                           pVideoCodecCtx->width,pVideoCodecCtx->height);
+                //原生绘制：6 unlock
+                ANativeWindow_unlockAndPost(nativeWindow);
+
+                usleep(1000 * 16);
             }
         }
         av_free_packet(pPacket);
     }
-    fclose(file);
-    av_frame_free(&pFrame);
-    avcodec_close(pCodecCtx);
+    ANativeWindow_release(nativeWindow);
+    avformat_free_context(pFormatCtx);
+    av_frame_free(&yuv_frame);
+    av_frame_free(&rgb_frame);
+    avcodec_close(pVideoCodecCtx);
     (*env)->ReleaseStringUTFChars(env, input_jstr, input_cstr);
-    (*env)->ReleaseStringUTFChars(env, output_jstr, output_cstr);
 }
+
 
 #pragma clang diagnostic pop

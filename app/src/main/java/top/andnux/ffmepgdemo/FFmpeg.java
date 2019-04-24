@@ -1,5 +1,7 @@
 package top.andnux.ffmepgdemo;
 
+import android.view.Surface;
+
 public class FFmpeg {
 
     public static void loadLibrary() {
@@ -19,5 +21,5 @@ public class FFmpeg {
     }
 
     public static native void sound(String input,String output);
-    public static native void decode(String input,String output);
+    public static native void decode(String input, Surface surface);
 }

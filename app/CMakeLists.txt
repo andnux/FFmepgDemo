@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 2.8.2)
 include_directories(libs/include src/main/cpp)
 
 file(GLOB SRC src/main/cpp/*.cpp src/main/cpp/*.c
-              src/main/jni/*.c src/main/jni/*.cpp)
+        src/main/jni/*.c src/main/jni/*.cpp)
 
 add_library(ffmpeg SHARED ${SRC})
 
@@ -63,6 +63,12 @@ set_target_properties(swscale
         PROPERTIES IMPORTED_LOCATION
         ${CMAKE_SOURCE_DIR}/libs/${ANDROID_ABI}/libswscale-5.so)
 
+add_library(yuv
+        SHARED
+        IMPORTED)
+set_target_properties(yuv
+        PROPERTIES IMPORTED_LOCATION
+        ${CMAKE_SOURCE_DIR}/libs/${ANDROID_ABI}/libyuv.so)
 target_link_libraries(ffmpeg log
         avcodec
         avdevice
@@ -72,4 +78,7 @@ target_link_libraries(ffmpeg log
         postproc
         swresample
         swscale
-        atomic)
+        atomic
+        jnigraphics
+        android
+        yuv)
